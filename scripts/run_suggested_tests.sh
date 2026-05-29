@@ -35,6 +35,11 @@ MEMORY_SWAP_MAX="${MEMORY_SWAP_MAX:-0}"
 # Optional early abort inside the Python process, before the cgroup kill point.
 ABORT_RSS_GB="${ABORT_RSS_GB:-0}"
 
+# Observational phase tracing around known Isaac Lab allocator-heavy calls.
+# This does not evict memory; it only adds checkpoints.
+TRACE_ALLOCATORS="${TRACE_ALLOCATORS:-1}"
+TRACE_MAX_CALLS="${TRACE_MAX_CALLS:-3}"
+
 # Scenario toggles. Defaults cover the key isolations without over-running many incompatible variants.
 RUN_SYSTEM_INFO="${RUN_SYSTEM_INFO:-1}"
 RUN_VERIFY_DEVELOP="${RUN_VERIFY_DEVELOP:-1}"
@@ -101,6 +106,11 @@ base_args() {
   if [[ -n "$SCENE_BACKEND" ]]; then cmd+=(--scene_backend "$SCENE_BACKEND"); fi
   if [[ -n "$TASK_BACKEND" ]]; then cmd+=(--task_backend "$TASK_BACKEND"); fi
   if [[ "$ABORT_RSS_GB" != "0" && "$ABORT_RSS_GB" != "0.0" ]]; then cmd+=(--abort_rss_gb "$ABORT_RSS_GB"); fi
+  if [[ "$TRACE_ALLOCATORS" == "0" ]]; then
+    cmd+=(--no_trace_isaaclab_allocators)
+  else
+    cmd+=(--trace_max_calls "$TRACE_MAX_CALLS")
+  fi
   cmd+=("$@")
   printf '%s\0' "${cmd[@]}"
 }

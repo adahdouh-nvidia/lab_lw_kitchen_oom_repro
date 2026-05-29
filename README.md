@@ -15,6 +15,28 @@ Python:         3.12 conda environment by default
 Gym API:        gymnasium, not the old OpenAI Gym package
 ```
 
+## Two traps this package tries to avoid
+
+### 1. Treating eviction as a fix
+
+The gist-style eviction experiment is a diagnostic/workaround, not a fix. It can show that some resident pages are cold over a measurement window, but that does not prove the pages are permanently unnecessary or safe to discard. The eviction approach also has sharp edges: it may need to carve around GPU-communication memory such as Vulkan/CUDA/PhysX regions, because evicting the wrong range can crash PhysX or corrupt the run.
+
+This package is intentionally **no-eviction**. It does not call `clear_refs`, `madvise`, `mmap`, `MAP_FIXED`, heap-carving code, or any manual VMA replacement. The first job is to reproduce the actual kitchen OOM without changing the process memory map.
+
+If someone adds eviction to a local fork of the kitchen repro, do not trust a `freed N GB` number by itself. Treat it as valid only if the post-eviction checks still pass: render, step, reset, another render, and longer stepping with contacts/cameras enabled. A short no-crash window is not enough evidence that the evicted pages were truly disposable.
+
+### 2. Treating high RSS as the root cause
+
+High RSS reproduces the symptom; it does not identify the cause. This revision adds observational trace checkpoints around the allocator-heavy Isaac Lab phases that are most useful to investigate after the symptom is reproduced:
+
+```text
+SimulationContext.reset
+InteractiveScene.clone_environments
+ManagerBasedRLEnv.step
+```
+
+The trace wrappers only add checkpoints. They do not evict memory or alter allocator state. In the report, look for the largest positive deltas around `TRACE after ...` rows before drawing conclusions.
+
 ## Important note about `gymnasium.make`
 
 The checkpoint named `after gymnasium.make` is not a branch reference and does not mean the old `gym` package. The repro imports:
@@ -71,6 +93,9 @@ before parse_env_cfg
 after parse_env_cfg
 before gymnasium.make
 after gymnasium.make
+TRACE before/after InteractiveScene.clone_environments #N, if symbol is available
+TRACE before/after SimulationContext.reset #N, if symbol is available
+TRACE before/after ManagerBasedRLEnv.step #N, if symbol is available
 before warmup_rendering
 after warmup_rendering
 before env.reset
@@ -83,7 +108,24 @@ after step 10 / 50 / 100
 completed or exception
 ```
 
-This lets you see whether the host-RAM jump happens during scene construction, environment cloning, camera/render warmup, reset/physics initialization, first render, or stepping.
+This lets you see whether the host-RAM jump happens during scene construction, environment cloning, camera/render warmup, reset/physics initialization, first render, or stepping. When trace wrappers are installed, the report can separate broad checkpoints such as `gymnasium.make` from narrower Isaac Lab calls such as `InteractiveScene.clone_environments` and `SimulationContext.reset`.
+
+Allocator tracing is enabled by default and can be tuned from the command line:
+
+```bash
+# default behavior: trace first three calls per target
+python $LW_OOM_REPRO_DIR/scripts/kitchen_oom_repro.py ... --trace_max_calls 3
+
+# disable observational tracing if monkeypatching gets in the way of debugging
+python $LW_OOM_REPRO_DIR/scripts/kitchen_oom_repro.py ... --no_trace_isaaclab_allocators
+```
+
+The bash wrappers expose the same controls:
+
+```bash
+TRACE_ALLOCATORS=1 TRACE_MAX_CALLS=3 bash $LW_OOM_REPRO_DIR/scripts/run_suggested_tests.sh
+TRACE_ALLOCATORS=0 bash $LW_OOM_REPRO_DIR/scripts/run_suggested_tests.sh
+```
 
 ## Requirements
 
@@ -102,7 +144,7 @@ Both Isaac Sim `develop` and Isaac Lab `develop` are active development branches
 Unzip the package and run the setup helper:
 
 ```bash
-unzip lw_kitchen_oom_repro_package_develop.zip
+unzip lw_kitchen_oom_repro_package_simlab_develop_v2.zip
 cd lw_kitchen_oom_repro
 chmod +x setup_clean_linux.sh scripts/*.sh scripts/*.py analysis/*.py
 ISAACSIM_ACCEPT_EULA=1 ./setup_clean_linux.sh
@@ -405,7 +447,10 @@ The HTML report is self-contained and can be opened locally in a browser. It inc
 - Peak host memory versus `num_envs`.
 - Peak process GPU memory versus `num_envs`.
 - Memory-component plots from `smaps_rollup`.
+- A largest-checkpoint-delta table and `checkpoint_deltas.csv`, which are the first place to look for likely cause localization.
 - A run summary table with exit reason, exit status, peak RSS/HWM, GPU memory, and last checkpoint.
+
+The static plot helper also writes `largest_rss_deltas.png` and `static_checkpoint_deltas.csv`.
 
 ## Suggested manual testing steps
 
@@ -515,7 +560,12 @@ Attach this directory along with the logs. It includes driver, GPU, OS, glibc, P
 
 ## How to interpret results
 
-- Large jump at `after gymnasium.make`: scene construction, USD loading, cloning, or asset duplication.
+Start with `analysis/checkpoint_deltas.csv` or the "Largest checkpoint RSS deltas" section in `analysis/oom_report.html`. The biggest positive deltas show where to aim next; they do not automatically prove a leak.
+
+- Large jump at `TRACE after InteractiveScene.clone_environments`: environment cloning, USD duplication, asset/reference behavior, physics replication, or scenegraph instancing.
+- Large jump at `TRACE after SimulationContext.reset`: physics initialization, PhysX buffers, collider/contact structures, simulator state, or render/physics synchronization.
+- Large jump at `TRACE after ManagerBasedRLEnv.step`: first warm step, contact generation, lazy runtime buffers, controller/action path, or observation generation.
+- Large jump at `after gymnasium.make`: scene construction, USD loading, cloning, or asset duplication. Use trace rows, if present, to split this broad phase into narrower causes.
 - Large jump at `after warmup_rendering` or `after first env.render`: cameras, render products, annotators, renderer caches, or image buffers.
 - Large jump at `after env.reset`: physics initialization, contact structures, buffers, or simulator state.
 - Large jump at `after first env.step`: runtime physics, contact generation, controller/action path, or lazy initialization.

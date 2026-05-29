@@ -57,6 +57,61 @@ def load_logs(log_root: Path):
     return pd.concat(frames, ignore_index=True)
 
 
+def classify_transition(transition: str) -> str:
+    text = str(transition)
+    if "InteractiveScene.clone_environments" in text:
+        return "clone_environments"
+    if "SimulationContext.reset" in text:
+        return "SimulationContext.reset"
+    if "ManagerBasedRLEnv.step" in text:
+        return "ManagerBasedRLEnv.step / warm step"
+    if "gymnasium.make" in text:
+        return "gymnasium.make env construction"
+    if "warmup_rendering" in text:
+        return "camera/render warmup"
+    if "first env.render" in text:
+        return "first render / camera path"
+    if "env.reset" in text:
+        return "env.reset / physics init"
+    if "first env.step" in text:
+        return "first env.step / runtime buffers"
+    return "other"
+
+
+def compute_deltas(df):
+    import pandas as pd
+
+    if df.empty or not {"run_id", "label", "rss_gb"}.issubset(df.columns):
+        return pd.DataFrame()
+    work = df.copy()
+    if "checkpoint_index" not in work.columns:
+        work["checkpoint_index"] = work.groupby("run_id").cumcount()
+    for col in ["rss_gb", "hwm_gb", "pid_gpu_used_mb", "gpu_total_used_mb", "num_envs"]:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+    rows = []
+    for run_id, group in work.sort_values(["run_id", "checkpoint_index"]).groupby("run_id", dropna=False):
+        group = group.reset_index(drop=True)
+        for i in range(1, len(group)):
+            prev = group.iloc[i - 1]
+            cur = group.iloc[i]
+            transition = f"{prev.get('label', '')} -> {cur.get('label', '')}"
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "scenario": cur.get("scenario", ""),
+                    "layout": cur.get("layout", ""),
+                    "num_envs": cur.get("num_envs", ""),
+                    "transition": transition,
+                    "phase_hint": classify_transition(transition),
+                    "delta_rss_gb": cur.get("rss_gb") - prev.get("rss_gb"),
+                    "delta_hwm_gb": cur.get("hwm_gb") - prev.get("hwm_gb") if "hwm_gb" in work.columns else None,
+                    "delta_pid_gpu_used_mb": cur.get("pid_gpu_used_mb") - prev.get("pid_gpu_used_mb") if "pid_gpu_used_mb" in work.columns else None,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def summary_by_run(df):
     if df.empty:
         return df
@@ -89,7 +144,10 @@ def main() -> None:
     if df.empty:
         raise SystemExit(f"No memory_checkpoints.csv files found under {log_root}")
     summary = summary_by_run(df)
+    deltas = compute_deltas(df)
     summary.to_csv(out_dir / "static_summary_by_run.csv", index=False)
+    if not deltas.empty:
+        deltas.to_csv(out_dir / "static_checkpoint_deltas.csv", index=False)
 
     # Plot 1: RSS timeline.
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -119,7 +177,22 @@ def main() -> None:
     fig.savefig(path2, dpi=160)
     plt.close(fig)
 
-    # Plot 3: peak process GPU memory vs env count.
+    # Plot 3: largest positive RSS deltas by checkpoint transition.
+    if not deltas.empty and "delta_rss_gb" in deltas.columns:
+        top = deltas.dropna(subset=["delta_rss_gb"]).sort_values("delta_rss_gb", ascending=False).head(25)
+        if not top.empty:
+            labels = [str(x)[:90] for x in top["transition"]]
+            fig, ax = plt.subplots(figsize=(12, max(6, 0.28 * len(top))))
+            ax.barh(labels[::-1], top["delta_rss_gb"].iloc[::-1])
+            ax.set_xlabel("RSS delta (GB)")
+            ax.set_ylabel("checkpoint transition")
+            ax.set_title("Largest positive RSS jumps by checkpoint transition")
+            fig.tight_layout()
+            path_delta = out_dir / "largest_rss_deltas.png"
+            fig.savefig(path_delta, dpi=160)
+            plt.close(fig)
+
+    # Plot 4: peak process GPU memory vs env count.
     if "max_pid_gpu_used_mb" in summary.columns and summary["max_pid_gpu_used_mb"].notna().any():
         fig, ax = plt.subplots(figsize=(10, 6))
         for scenario, group in summary.dropna(subset=["num_envs", "max_pid_gpu_used_mb"]).groupby("scenario"):

@@ -30,6 +30,8 @@ USE_SYSTEMD_SCOPE="${USE_SYSTEMD_SCOPE:-0}"
 MEMORY_MAX="${MEMORY_MAX:-120G}"
 MEMORY_SWAP_MAX="${MEMORY_SWAP_MAX:-0}"
 ABORT_RSS_GB="${ABORT_RSS_GB:-0}"
+TRACE_ALLOCATORS="${TRACE_ALLOCATORS:-1}"
+TRACE_MAX_CALLS="${TRACE_MAX_CALLS:-3}"
 STOP_ON_FAILURE="${STOP_ON_FAILURE:-1}"
 
 mkdir -p "$LOG_ROOT"
@@ -54,6 +56,11 @@ for N in $ENVS; do
   if [[ -n "$TASK_BACKEND" ]]; then cmd+=(--task_backend "$TASK_BACKEND"); fi
   if [[ -n "$CAMERA_RESOLUTION" ]]; then cmd+=(--camera_resolution "$CAMERA_RESOLUTION"); fi
   if [[ "$ABORT_RSS_GB" != "0" && "$ABORT_RSS_GB" != "0.0" ]]; then cmd+=(--abort_rss_gb "$ABORT_RSS_GB"); fi
+  if [[ "$TRACE_ALLOCATORS" == "0" ]]; then
+    cmd+=(--no_trace_isaaclab_allocators)
+  else
+    cmd+=(--trace_max_calls "$TRACE_MAX_CALLS")
+  fi
 
   echo "==== Running num_envs=$N; logs=$RUN_DIR ====" | tee "$RUN_DIR/wrapper.log"
   printf 'command:' | tee -a "$RUN_DIR/wrapper.log"

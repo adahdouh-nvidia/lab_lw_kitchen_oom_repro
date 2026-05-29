@@ -155,6 +155,111 @@ def build_summary(df):
     return summary
 
 
+def classify_transition(transition: str) -> str:
+    text = str(transition)
+    if "InteractiveScene.clone_environments" in text:
+        return "clone_environments"
+    if "SimulationContext.reset" in text:
+        return "SimulationContext.reset"
+    if "ManagerBasedRLEnv.step" in text:
+        return "ManagerBasedRLEnv.step / warm step"
+    if "gymnasium.make" in text:
+        return "gymnasium.make env construction"
+    if "warmup_rendering" in text:
+        return "camera/render warmup"
+    if "first env.render" in text:
+        return "first render / camera path"
+    if "env.reset" in text:
+        return "env.reset / physics init"
+    if "first env.step" in text:
+        return "first env.step / runtime buffers"
+    if "parse_env_cfg" in text:
+        return "config parsing"
+    return "other"
+
+
+def compute_deltas(df):
+    import pandas as pd
+
+    if df.empty:
+        return pd.DataFrame()
+    required = {"run_id", "checkpoint_index", "label"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    numeric_candidates = [
+        "rss_gb",
+        "hwm_gb",
+        "smaps_rss_gb",
+        "smaps_pss_gb",
+        "private_dirty_gb",
+        "private_clean_gb",
+        "anonymous_gb",
+        "locked_gb",
+        "anon_huge_pages_gb",
+        "pid_gpu_used_mb",
+        "gpu_total_used_mb",
+        "t_s",
+    ]
+    work = df.sort_values(["run_id", "checkpoint_index"]).copy()
+    for col in numeric_candidates:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    rows = []
+    for run_id, group in work.groupby("run_id", dropna=False):
+        group = group.sort_values("checkpoint_index").reset_index(drop=True)
+        for i in range(1, len(group)):
+            prev = group.iloc[i - 1]
+            cur = group.iloc[i]
+            transition = f"{prev.get('label', '')} -> {cur.get('label', '')}"
+            row = {
+                "run_id": run_id,
+                "run_dir": cur.get("run_dir", ""),
+                "scenario": cur.get("scenario", ""),
+                "layout": cur.get("layout", ""),
+                "num_envs": cur.get("num_envs", ""),
+                "from_label": prev.get("label", ""),
+                "to_label": cur.get("label", ""),
+                "transition": transition,
+                "phase_hint": classify_transition(transition),
+                "checkpoint_index": cur.get("checkpoint_index", i),
+            }
+            for col in numeric_candidates:
+                if col in work.columns:
+                    try:
+                        row[f"delta_{col}"] = cur[col] - prev[col]
+                    except Exception:
+                        row[f"delta_{col}"] = None
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def make_delta_table_html(deltas) -> str:
+    if deltas.empty or "delta_rss_gb" not in deltas.columns:
+        return "<p>No checkpoint delta table available.</p>"
+    view = deltas.copy()
+    view = view.sort_values("delta_rss_gb", ascending=False, na_position="last").head(30)
+    cols = [
+        "scenario",
+        "layout",
+        "num_envs",
+        "phase_hint",
+        "transition",
+        "delta_rss_gb",
+        "delta_private_dirty_gb",
+        "delta_anonymous_gb",
+        "delta_locked_gb",
+        "delta_pid_gpu_used_mb",
+        "run_id",
+    ]
+    available = [c for c in cols if c in view.columns]
+    view = view[available].copy()
+    for col in view.select_dtypes(include="number").columns:
+        view[col] = view[col].round(3)
+    return view.to_html(index=False, classes="summary-table", escape=True)
+
+
 def make_table_html(summary) -> str:
     cols = [
         "scenario",
@@ -182,7 +287,7 @@ def make_table_html(summary) -> str:
     return view.to_html(index=False, classes="summary-table", escape=True)
 
 
-def plot_html_parts(df, summary):
+def plot_html_parts(df, summary, deltas):
     import pandas as pd
     import plotly.express as px
     import plotly.io as pio
@@ -252,6 +357,38 @@ def plot_html_parts(df, summary):
             )
             add_fig("Memory components across checkpoints", fig)
 
+    if not deltas.empty and {"delta_rss_gb", "transition", "run_id"}.issubset(deltas.columns):
+        delta_view = deltas.dropna(subset=["delta_rss_gb"]).copy()
+        delta_view = delta_view.sort_values("delta_rss_gb", ascending=False).head(40)
+        if not delta_view.empty:
+            delta_view["transition_short"] = delta_view["transition"].astype(str).str.slice(0, 90)
+            fig = px.bar(
+                delta_view,
+                x="delta_rss_gb",
+                y="transition_short",
+                color="phase_hint" if "phase_hint" in delta_view.columns else None,
+                hover_data=[c for c in ["run_id", "scenario", "layout", "num_envs", "delta_private_dirty_gb", "delta_anonymous_gb", "delta_locked_gb", "delta_pid_gpu_used_mb"] if c in delta_view.columns],
+                labels={"delta_rss_gb": "RSS delta (GB)", "transition_short": "checkpoint transition"},
+                orientation="h",
+            )
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            add_fig("Largest positive RSS jumps by checkpoint transition", fig)
+
+    if not deltas.empty and {"num_envs", "delta_rss_gb", "phase_hint"}.issubset(deltas.columns):
+        focus = deltas[deltas["phase_hint"].isin(["clone_environments", "SimulationContext.reset", "ManagerBasedRLEnv.step / warm step", "gymnasium.make env construction", "env.reset / physics init", "first env.step / runtime buffers"])]
+        focus = focus.dropna(subset=["delta_rss_gb", "num_envs"])
+        if not focus.empty:
+            fig = px.scatter(
+                focus,
+                x="num_envs",
+                y="delta_rss_gb",
+                color="phase_hint",
+                symbol="scenario" if "scenario" in focus.columns else None,
+                hover_data=[c for c in ["run_id", "transition", "layout", "delta_private_dirty_gb", "delta_anonymous_gb", "delta_locked_gb"] if c in focus.columns],
+                labels={"num_envs": "num_envs", "delta_rss_gb": "RSS delta for phase (GB)"},
+            )
+            add_fig("Allocator-phase RSS deltas vs number of environments", fig)
+
     if not df.empty and {"label", "rss_gb"}.issubset(df.columns):
         # The last row per label/run keeps the chart compact while preserving checkpoint names.
         label_df = df.dropna(subset=["rss_gb"]).copy()
@@ -288,14 +425,18 @@ def main() -> None:
     if df.empty:
         raise SystemExit(f"No memory_checkpoints.csv files found under {log_root}")
     summary = build_summary(df)
+    deltas = compute_deltas(df)
 
     combined_csv = output.parent / "combined_checkpoints.csv"
     summary_csv = output.parent / "summary_by_run.csv"
+    deltas_csv = output.parent / "checkpoint_deltas.csv"
     df.to_csv(combined_csv, index=False)
     summary.to_csv(summary_csv, index=False)
+    deltas.to_csv(deltas_csv, index=False)
 
     table_html = make_table_html(summary)
-    plot_parts = plot_html_parts(df, summary)
+    delta_table_html = make_delta_table_html(deltas)
+    plot_parts = plot_html_parts(df, summary, deltas)
 
     style = """
     <style>
@@ -321,13 +462,19 @@ def main() -> None:
 <p>Log root: <code>{log_root}</code></p>
 <p>Generated from <code>memory_checkpoints.csv</code>, <code>summary.json</code>, and wrapper logs.</p>
 <div class="note">
-  <strong>Reading guide:</strong> A large jump at <code>after gymnasium.make</code> usually points to scene construction, USD loading, cloning, or asset duplication.
-  A large jump at <code>after warmup_rendering</code> or <code>after first env.render</code> usually points to cameras/render products.
-  A large jump at <code>after env.reset</code> or <code>after first env.step</code> usually points to physics initialization, contact structures, or runtime buffers.
+  <strong>Reading guide:</strong> Reproducing high RSS is only the first step. Cause localization starts with the largest positive checkpoint deltas.
+  Focus first on traced allocator phases such as <code>TRACE after InteractiveScene.clone_environments</code>,
+  <code>TRACE after SimulationContext.reset</code>, and <code>TRACE after ManagerBasedRLEnv.step</code>.
+  Without trace labels, a large jump at <code>after gymnasium.make</code> usually points to scene construction, USD loading, cloning, or asset duplication;
+  <code>after warmup_rendering</code> / <code>after first env.render</code> points to cameras/render products;
+  <code>after env.reset</code> / <code>after first env.step</code> points to physics initialization, contact structures, or runtime buffers.
 </div>
 <h2>Run summary</h2>
-<p>CSV outputs: <code>{combined_csv.name}</code> and <code>{summary_csv.name}</code>.</p>
+<p>CSV outputs: <code>{combined_csv.name}</code>, <code>{summary_csv.name}</code>, and <code>{deltas_csv.name}</code>.</p>
 {table_html}
+<h2>Largest checkpoint RSS deltas</h2>
+<p>This table helps avoid conflating the reproduced symptom with the cause. It lists the biggest positive RSS jumps between adjacent checkpoints.</p>
+{delta_table_html}
 <h2>Interactive plots</h2>
 {''.join(plot_parts)}
 </body>
@@ -337,6 +484,7 @@ def main() -> None:
     print(f"Wrote interactive report: {output}")
     print(f"Wrote combined checkpoints: {combined_csv}")
     print(f"Wrote run summary: {summary_csv}")
+    print(f"Wrote checkpoint deltas: {deltas_csv}")
 
 
 if __name__ == "__main__":

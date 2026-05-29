@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
+import importlib
 import inspect
 import json
 import os
@@ -71,6 +73,20 @@ parser.add_argument("--abort_rss_gb", type=float, default=0.0, help="If >0, exit
 parser.add_argument("--metadata", action="append", default=[], help="Extra key=value metadata to place in summary.json")
 parser.add_argument("--print_env_cfg", action="store_true", help="Print env_cfg after construction")
 parser.add_argument("--no_close", action="store_true", help="Do not close env at exit; useful only for post-mortem debugging")
+parser.add_argument(
+    "--trace_isaaclab_allocators",
+    dest="trace_isaaclab_allocators",
+    action="store_true",
+    default=True,
+    help="Checkpoint around known Isaac Lab allocation-heavy phases: SimulationContext.reset, InteractiveScene.clone_environments, and ManagerBasedRLEnv.step. Enabled by default.",
+)
+parser.add_argument(
+    "--no_trace_isaaclab_allocators",
+    dest="trace_isaaclab_allocators",
+    action="store_false",
+    help="Disable monkeypatch-based allocator phase tracing.",
+)
+parser.add_argument("--trace_max_calls", type=int, default=3, help="Maximum calls per traced method to checkpoint. Use 1 for minimal overhead; default: 3.")
 
 # AppLauncher adds --headless, --enable_cameras, --device-like launcher args, etc.
 AppLauncher.add_app_launcher_args(parser)
@@ -106,6 +122,8 @@ for key in [
     "metadata",
     "print_env_cfg",
     "no_close",
+    "trace_isaaclab_allocators",
+    "trace_max_calls",
 ]:
     if key in cli_raw:
         merged[key] = cli_raw[key]
@@ -381,6 +399,8 @@ def write_summary(**extra: Any) -> None:
         "replicate_physics_override": args_cli.replicate_physics,
         "clone_in_fabric_override": args_cli.clone_in_fabric,
         "create_stage_in_memory_override": args_cli.create_stage_in_memory,
+        "trace_isaaclab_allocators": bool(getattr(args_cli, "trace_isaaclab_allocators", False)),
+        "trace_max_calls": int(getattr(args_cli, "trace_max_calls", 0)),
         "metadata": meta,
         **extra,
     }
@@ -388,6 +408,91 @@ def write_summary(**extra: Any) -> None:
 
 
 # --------------------------- Env creation ----------------------------------
+
+
+TRACE_COUNTS: dict[str, int] = {}
+TRACE_INSTALLED = False
+
+
+def install_isaaclab_allocator_tracing() -> None:
+    """Checkpoint around allocation-heavy Isaac Lab phases when symbols exist.
+
+    This is intentionally observational: it does not clear reference bits, evict
+    memory, remap VMAs, or mutate allocator state. It only wraps a few method
+    calls so the CSV can distinguish symptom reproduction from first-pass cause
+    localization.
+    """
+    global TRACE_INSTALLED
+    if TRACE_INSTALLED:
+        return
+    TRACE_INSTALLED = True
+
+    if not bool(getattr(args_cli, "trace_isaaclab_allocators", True)):
+        append_event({"type": "allocator_trace_disabled"})
+        return
+
+    max_calls = max(0, int(getattr(args_cli, "trace_max_calls", 3) or 0))
+    if max_calls <= 0:
+        append_event({"type": "allocator_trace_disabled", "reason": "trace_max_calls<=0"})
+        return
+
+    targets = [
+        ("isaaclab.sim.simulation_context", "SimulationContext", "reset", "SimulationContext.reset"),
+        ("isaaclab.scene.interactive_scene", "InteractiveScene", "clone_environments", "InteractiveScene.clone_environments"),
+        ("isaaclab.envs.manager_based_rl_env", "ManagerBasedRLEnv", "step", "ManagerBasedRLEnv.step"),
+    ]
+
+    for module_name, class_name, method_name, label_base in targets:
+        try:
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name)
+            original = getattr(cls, method_name)
+            if getattr(original, "_kitchen_oom_traced", False):
+                append_event({"type": "allocator_trace_already_installed", "target": label_base})
+                continue
+
+            @functools.wraps(original)
+            def wrapper(self, *args, __original=original, __label_base=label_base, **kwargs):
+                call_index = TRACE_COUNTS.get(__label_base, 0) + 1
+                TRACE_COUNTS[__label_base] = call_index
+                if call_index <= max_calls:
+                    append_event({"type": "allocator_trace_enter", "target": __label_base, "call_index": call_index})
+                    checkpoint(f"TRACE before {__label_base} #{call_index}")
+                    try:
+                        result = __original(self, *args, **kwargs)
+                    except BaseException as exc:
+                        append_event(
+                            {
+                                "type": "allocator_trace_exception",
+                                "target": __label_base,
+                                "call_index": call_index,
+                                "error": repr(exc),
+                            }
+                        )
+                        try:
+                            checkpoint(f"TRACE exception {__label_base} #{call_index}")
+                        except Exception:
+                            pass
+                        raise
+                    checkpoint(f"TRACE after {__label_base} #{call_index}")
+                    append_event({"type": "allocator_trace_exit", "target": __label_base, "call_index": call_index})
+                    return result
+                return __original(self, *args, **kwargs)
+
+            setattr(wrapper, "_kitchen_oom_traced", True)
+            setattr(cls, method_name, wrapper)
+            print(f"[TRACE] installed allocator checkpoint wrapper for {label_base}", flush=True)
+            append_event({"type": "allocator_trace_installed", "target": label_base, "module": module_name})
+        except Exception as exc:
+            print(f"[TRACE] could not install wrapper for {label_base}: {exc!r}", flush=True)
+            append_event(
+                {
+                    "type": "allocator_trace_install_failed",
+                    "target": label_base,
+                    "module": module_name,
+                    "error": repr(exc),
+                }
+            )
 
 
 def bool_str(value: str | None) -> bool | None:
@@ -543,6 +648,8 @@ def main() -> None:
         torch.manual_seed(int(getattr(args_cli, "seed", 42)))
     except Exception:
         pass
+
+    install_isaaclab_allocator_tracing()
 
     checkpoint("before parse_env_cfg")
     task_name, env_cfg = make_env_cfg()
