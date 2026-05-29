@@ -37,6 +37,7 @@ ABORT_RSS_GB="${ABORT_RSS_GB:-0}"
 
 # Scenario toggles. Defaults cover the key isolations without over-running many incompatible variants.
 RUN_SYSTEM_INFO="${RUN_SYSTEM_INFO:-1}"
+RUN_VERIFY_DEVELOP="${RUN_VERIFY_DEVELOP:-1}"
 RUN_CAMERA_SWEEP="${RUN_CAMERA_SWEEP:-1}"
 RUN_NO_CAMERA_FOCUS="${RUN_NO_CAMERA_FOCUS:-1}"
 RUN_LOWRES_FOCUS="${RUN_LOWRES_FOCUS:-1}"
@@ -133,6 +134,14 @@ run_case() {
   mapfile -d '' cmd < <(base_args "$run_dir" "$num_envs" "$layout" "${extra[@]}")
   run_logged "$run_dir" "${cmd[@]}"
 }
+
+if [[ "$RUN_VERIFY_DEVELOP" == "1" ]]; then
+  if [[ -x "$SCRIPT_DIR/verify_develop_install.sh" ]]; then
+    bash "$SCRIPT_DIR/verify_develop_install.sh" 2>&1 | tee "$LOG_ROOT/verify_develop_install.log" || true
+  elif [[ -x "$SCRIPT_DIR/verify_isaaclab_develop_install.sh" ]]; then
+    bash "$SCRIPT_DIR/verify_isaaclab_develop_install.sh" 2>&1 | tee "$LOG_ROOT/verify_develop_install.log" || true
+  fi
+fi
 
 if [[ "$RUN_SYSTEM_INFO" == "1" ]]; then
   bash "$SCRIPT_DIR/collect_system_info.sh" "$LOG_ROOT/system_info" || true

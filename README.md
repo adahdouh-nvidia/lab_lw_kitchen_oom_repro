@@ -1,8 +1,35 @@
-# LW-BenchHub Kitchen OOM Repro Kit
+# LW-BenchHub Kitchen OOM Repro Kit for Isaac Sim develop + Isaac Lab develop
 
 This zip contains a no-eviction diagnostic package for the Isaac Lab / LW-BenchHub kitchen memory issue.
 
 The goal is to reproduce the original problem directly: loading, rendering, resetting, and stepping real LW-BenchHub / LIBERO kitchen scenes at increasing `num_envs`, up to the reported 256-kitchen case. The Python repro does not call `clear_refs`, `madvise`, `mmap`, or any other manual memory eviction path.
+
+This revision targets:
+
+```text
+Isaac Sim repo: https://github.com/isaac-sim/IsaacSim.git
+Isaac Sim ref:  develop, built from source by default unless overridden
+Isaac Lab repo: https://github.com/isaac-sim/IsaacLab.git
+Isaac Lab ref:  develop, installed from source unless overridden
+Python:         3.12 conda environment by default
+Gym API:        gymnasium, not the old OpenAI Gym package
+```
+
+## Important note about `gymnasium.make`
+
+The checkpoint named `after gymnasium.make` is not a branch reference and does not mean the old `gym` package. The repro imports:
+
+```python
+import gymnasium as gym
+```
+
+and then calls:
+
+```python
+env = gym.make(task_name, cfg=env_cfg, render_mode=render_mode)
+```
+
+That is the Gymnasium environment factory used by Isaac Lab examples. The log label now says `gymnasium.make` to avoid ambiguity. A large jump at `after gymnasium.make` means the memory increase happened while the Isaac Lab environment was being constructed: scene construction, USD loading, cloning, or asset duplication.
 
 ## Package layout
 
@@ -12,13 +39,15 @@ lw_kitchen_oom_repro/
   setup_clean_linux.sh
   requirements-analysis.txt
   scripts/
-    kitchen_oom_repro.py          # no-eviction Python repro harness
-    run_kitchen_oom_sweep.sh      # simple env-count sweep wrapper
-    run_suggested_tests.sh        # recommended diagnostic matrix
-    collect_system_info.sh        # machine/env metadata collector
+    kitchen_oom_repro.py                   # no-eviction Python repro harness
+    run_kitchen_oom_sweep.sh               # simple env-count sweep wrapper
+    run_suggested_tests.sh                 # recommended diagnostic matrix
+    collect_system_info.sh                 # machine/env metadata collector
+    verify_develop_install.sh              # confirms active Isaac Sim + Isaac Lab checkout/import paths
+    verify_isaaclab_develop_install.sh     # backwards-compatible wrapper around verify_develop_install.sh
   analysis/
-    build_interactive_report.py   # offline Plotly HTML report
-    plot_memory_static.py         # PNG plots with matplotlib
+    build_interactive_report.py            # offline Plotly HTML report
+    plot_memory_static.py                  # PNG plots with matplotlib
 ```
 
 ## What the repro records
@@ -28,7 +57,7 @@ For each run, `kitchen_oom_repro.py` writes these files into its `--log_dir`:
 ```text
 memory_checkpoints.csv      # one row per memory checkpoint
 summary.json                # run config, exit reason, metadata
-/events.jsonl               # structured checkpoints and warnings
+events.jsonl                # structured checkpoints and warnings
 smaps_rollup_*.txt          # /proc/self/smaps_rollup snapshots
 stdout_stderr.log           # created by the bash wrappers
 wrapper.log                 # command and exit status from the wrapper
@@ -40,8 +69,8 @@ The important checkpoints are:
 after AppLauncher
 before parse_env_cfg
 after parse_env_cfg
-before gym.make
-after gym.make
+before gymnasium.make
+after gymnasium.make
 before warmup_rendering
 after warmup_rendering
 before env.reset
@@ -62,31 +91,46 @@ Expected environment:
 
 - Linux workstation or server with an NVIDIA GPU.
 - Current NVIDIA driver. The setup script checks `nvidia-smi`, but it does not install GPU drivers.
-- Ubuntu 22.04+ is recommended because Isaac Sim pip installs require glibc 2.35 or newer.
-- Large disk space for Isaac Sim, Isaac Lab, LW-BenchHub, Git LFS assets, logs, and generated reports.
+- Ubuntu 22.04+ for Isaac Sim source builds; Ubuntu 24.04 also works, but the setup forces GCC/G++ 11 for the Isaac Sim source build.
+- Large disk space for Isaac Sim source checkout/build artifacts, Isaac Lab, LW-BenchHub, Git LFS assets, logs, and generated reports.
 - For a 256-kitchen OOM reproduction, run under a memory limit so the process fails cleanly instead of destabilizing the host.
+
+Both Isaac Sim `develop` and Isaac Lab `develop` are active development branches. The default setup now clones and builds `isaac-sim/IsaacSim@develop`, then clones and installs `isaac-sim/IsaacLab@develop` with `IsaacLab/_isaac_sim` linked to the Isaac Sim source build. If the moving branch tips are temporarily incompatible, set `ISAACSIM_COMMIT` and/or `ISAACLAB_COMMIT` to a known compatible pair.
 
 ## Fresh install from a clean Linux machine
 
 Unzip the package and run the setup helper:
 
 ```bash
-unzip lw_kitchen_oom_repro_package.zip
+unzip lw_kitchen_oom_repro_package_develop.zip
 cd lw_kitchen_oom_repro
 chmod +x setup_clean_linux.sh scripts/*.sh scripts/*.py analysis/*.py
-./setup_clean_linux.sh
+ISAACSIM_ACCEPT_EULA=1 ./setup_clean_linux.sh
 ```
+
+Only set `ISAACSIM_ACCEPT_EULA=1` after reviewing and accepting the NVIDIA Omniverse / Isaac Sim terms. Without it, the Isaac Sim source build will prompt interactively.
 
 By default, the installer:
 
-1. Installs common Ubuntu packages with `apt-get`.
+1. Installs common Ubuntu packages with `apt-get`, including Git LFS and GCC/G++ 11.
 2. Installs Miniconda if `conda` is missing.
-3. Creates a conda env named `lw_benchhub_oom` with Python 3.11.
-4. Clones `LightwheelAI/LW-BenchHub` into `$HOME/lw_kitchen_oom_work/LW-BenchHub`.
-5. Runs LW-BenchHub's own `install.sh`.
-6. Installs the analysis dependencies: `pandas`, `plotly`, `matplotlib`, and `psutil`.
-7. Copies this repro kit into the LW-BenchHub checkout as `repro_kitchen_oom`.
-8. Writes an activation helper at `$HOME/lw_kitchen_oom_work/activate_lw_kitchen_oom.sh`.
+3. Creates a conda env named `lw_benchhub_oom_develop` with Python 3.12.
+4. Installs `uv` into that env.
+5. Installs `pinocchio` from conda-forge, matching LW-BenchHub's installer behavior.
+6. Clones `isaac-sim/IsaacSim` into `$HOME/lw_kitchen_oom_work/IsaacSim`.
+7. Checks out `IsaacSim@develop`, unless overridden.
+8. Builds Isaac Sim from source with `./build.sh --config release`.
+9. Clones `isaac-sim/IsaacLab` into `$HOME/lw_kitchen_oom_work/IsaacLab`.
+10. Checks out `IsaacLab@develop`, unless overridden.
+11. Links `IsaacLab/_isaac_sim` to the Isaac Sim source build output.
+12. Sources Isaac Sim's `setup_conda_env.sh` when available.
+13. Runs `bash ./isaaclab.sh --install all` from the Isaac Lab checkout.
+14. Clones `LightwheelAI/LW-BenchHub` into `$HOME/lw_kitchen_oom_work/LW-BenchHub`.
+15. Installs LW-BenchHub and its `third_party/IsaacLab-Arena` submodule as editable packages without running LW-BenchHub's original `install.sh`.
+16. Installs analysis dependencies: `pandas`, `plotly`, `matplotlib`, and `psutil`.
+17. Copies this repro kit into the LW-BenchHub checkout as `repro_kitchen_oom`.
+18. Runs lightweight Python import checks.
+19. Writes an activation helper at `$HOME/lw_kitchen_oom_work/activate_lw_kitchen_oom.sh`.
 
 Activate the environment after setup:
 
@@ -97,27 +141,108 @@ source $HOME/lw_kitchen_oom_work/activate_lw_kitchen_oom.sh
 That command activates the conda env, changes directory into the LW-BenchHub repo, and sets:
 
 ```bash
+ISAACSIM_INSTALL_MODE
+ISAACSIM_DIR
+ISAACSIM_REPO_REF
+ISAACSIM_COMMIT
+ISAACSIM_PATH
+ISAACSIM_PYTHON_EXE
+ISAACLAB_DIR
+ISAACLAB_REPO_REF
+ISAACLAB_COMMIT
 LW_BENCHHUB_REPO_DIR
 LW_OOM_REPRO_DIR
 ```
 
-### Installer options
+Confirm the active Isaac Sim and Isaac Lab checkout/import paths:
 
-The setup script is controlled through environment variables:
+```bash
+bash $LW_OOM_REPRO_DIR/scripts/verify_develop_install.sh
+```
+
+## Installer options
+
+The setup script is controlled through environment variables.
+
+Basic examples:
 
 ```bash
 WORKDIR=$HOME/lw_oom_test ./setup_clean_linux.sh
 ENV_NAME=my_lw_env ./setup_clean_linux.sh
-LW_REPO_REF=main ./setup_clean_linux.sh
+REINSTALL_ENV=1 ./setup_clean_linux.sh
 SKIP_APT=1 ./setup_clean_linux.sh
 SKIP_NVIDIA_CHECK=1 ./setup_clean_linux.sh
 SKIP_GLIBC_CHECK=1 ./setup_clean_linux.sh
-SKIP_LW_INSTALL=1 ./setup_clean_linux.sh
-REINSTALL_ENV=1 ./setup_clean_linux.sh
 INSTALL_MINICONDA=0 ./setup_clean_linux.sh
 ```
 
-Use `SKIP_LW_INSTALL=1` only when LW-BenchHub and its dependencies are already installed in the active environment.
+Isaac Sim and Isaac Lab branch/commit targeting:
+
+```bash
+# Default behavior: Isaac Sim develop source build + Isaac Lab develop source install
+ISAACSIM_ACCEPT_EULA=1 ./setup_clean_linux.sh
+
+# Explicit develop refs
+ISAACSIM_REPO_REF=develop \
+ISAACLAB_REPO_REF=develop \
+ISAACSIM_ACCEPT_EULA=1 \
+./setup_clean_linux.sh
+
+# Pin to exact commits if tip-of-develop is broken or incompatible
+ISAACSIM_REPO_REF=develop \
+ISAACSIM_COMMIT=<isaac-sim-develop-commit> \
+ISAACLAB_REPO_REF=develop \
+ISAACLAB_COMMIT=<isaac-lab-develop-commit> \
+ISAACSIM_ACCEPT_EULA=1 \
+./setup_clean_linux.sh
+
+# Use an Isaac Lab beta tag instead of branch tip, while still using Isaac Sim source mode
+ISAACLAB_REPO_REF=v3.0.0-beta ISAACSIM_ACCEPT_EULA=1 ./setup_clean_linux.sh
+```
+
+Isaac Sim install controls:
+
+```bash
+# Default: clone and build isaac-sim/IsaacSim@develop from source
+ISAACSIM_INSTALL_MODE=source ISAACSIM_REPO_REF=develop ISAACSIM_ACCEPT_EULA=1 ./setup_clean_linux.sh
+
+# Use an already-built Isaac Sim source tree or external install
+ISAACSIM_INSTALL_MODE=external ISAACSIM_PATH=/path/to/IsaacSim/_build/linux-x86_64/release ./setup_clean_linux.sh
+
+# Fallback only: install the released Isaac Sim pip package instead of source develop.
+# This does NOT target IsaacSim@develop.
+ISAACSIM_INSTALL_MODE=pip ISAACSIM_VERSION=6.0.0 ./setup_clean_linux.sh
+
+# Skip Isaac Sim install entirely if the active environment is already configured
+ISAACSIM_INSTALL_MODE=skip ./setup_clean_linux.sh
+```
+
+Isaac Lab install size:
+
+```bash
+# Default: full install selector
+ISAACLAB_INSTALL_SELECTOR=all ./setup_clean_linux.sh
+
+# Smaller install selector; may not include all optional extras
+ISAACLAB_INSTALL_SELECTOR=core ./setup_clean_linux.sh
+```
+
+LW-BenchHub install behavior:
+
+```bash
+# Default: do not run LW-BenchHub's original install.sh
+./setup_clean_linux.sh
+
+# Only use this if you intentionally want LW-BenchHub's original installer.
+# It may install a different Isaac Lab / Isaac Sim stack and defeat the develop-source targeting.
+RUN_LW_INSTALL_SH=1 ./setup_clean_linux.sh
+
+# Clone/copy only, useful if dependencies are already installed
+SKIP_LW_INSTALL=1 ./setup_clean_linux.sh
+
+# Skip the IsaacLab-Arena editable install
+SKIP_ARENA_INSTALL=1 ./setup_clean_linux.sh
+```
 
 ## Run the recommended diagnostic matrix
 
@@ -131,12 +256,14 @@ USE_SYSTEMD_SCOPE=1 MEMORY_MAX=120G MEMORY_SWAP_MAX=0 \
 
 This runs the main no-eviction checks:
 
-1. Camera-enabled sweep over `num_envs`.
-2. 256 environments with cameras disabled.
-3. 256 environments with lower camera resolution.
-4. 256 environments on the alternate LIBERO kitchen layout.
-5. Optional cloning/fabric variant if explicitly enabled.
-6. Automatic HTML and PNG analysis at the end.
+1. Verifies the active Isaac Sim and Isaac Lab checkout/import paths.
+2. Collects system metadata.
+3. Camera-enabled sweep over `num_envs`.
+4. 256 environments with cameras disabled.
+5. 256 environments with lower camera resolution.
+6. 256 environments on the alternate LIBERO kitchen layout.
+7. Optional cloning/fabric variant if explicitly enabled.
+8. Automatic HTML and PNG analysis at the end.
 
 Default sweep:
 
@@ -384,11 +511,11 @@ A large change in `Private_Dirty`, `Anonymous`, or `Locked` memory between these
 bash $LW_OOM_REPRO_DIR/scripts/collect_system_info.sh oom_logs/system_info
 ```
 
-Attach this directory along with the logs. It includes driver, GPU, OS, glibc, Python package, and git metadata.
+Attach this directory along with the logs. It includes driver, GPU, OS, glibc, Python package, Isaac Lab git branch/commit, LW-BenchHub git branch/commit, and import-path metadata.
 
 ## How to interpret results
 
-- Large jump at `after gym.make`: scene construction, USD loading, cloning, or asset duplication.
+- Large jump at `after gymnasium.make`: scene construction, USD loading, cloning, or asset duplication.
 - Large jump at `after warmup_rendering` or `after first env.render`: cameras, render products, annotators, renderer caches, or image buffers.
 - Large jump at `after env.reset`: physics initialization, contact structures, buffers, or simulator state.
 - Large jump at `after first env.step`: runtime physics, contact generation, controller/action path, or lazy initialization.

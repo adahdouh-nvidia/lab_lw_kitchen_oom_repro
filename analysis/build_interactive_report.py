@@ -321,7 +321,7 @@ def main() -> None:
 <p>Log root: <code>{log_root}</code></p>
 <p>Generated from <code>memory_checkpoints.csv</code>, <code>summary.json</code>, and wrapper logs.</p>
 <div class="note">
-  <strong>Reading guide:</strong> A large jump at <code>after gym.make</code> usually points to scene construction or cloning.
+  <strong>Reading guide:</strong> A large jump at <code>after gymnasium.make</code> usually points to scene construction, USD loading, cloning, or asset duplication.
   A large jump at <code>after warmup_rendering</code> or <code>after first env.render</code> usually points to cameras/render products.
   A large jump at <code>after env.reset</code> or <code>after first env.step</code> usually points to physics initialization, contact structures, or runtime buffers.
 </div>

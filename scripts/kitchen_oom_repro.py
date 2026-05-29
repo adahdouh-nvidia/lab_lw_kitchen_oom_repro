@@ -466,7 +466,7 @@ def make_env_cfg() -> tuple[str, Any]:
         )
     except Exception as exc:
         # Duplicate registration is harmless in some local iteration cases.
-        print(f"[WARN] gym.register failed or duplicate id: {exc!r}", flush=True)
+        print(f"[WARN] gymnasium.register failed or duplicate id: {exc!r}", flush=True)
     return task_name, env_cfg
 
 
@@ -561,15 +561,15 @@ def main() -> None:
 
     env = None
     try:
-        checkpoint("before gym.make")
+        checkpoint("before gymnasium.make")
         env = gym.make(task_name, cfg=env_cfg, render_mode=render_mode)
-        checkpoint("after gym.make")
+        checkpoint("after gymnasium.make")
 
         stage_stats = get_stage_stats()
         if stage_stats:
             print(f"[STAGE] {json.dumps(stage_stats, sort_keys=True)}", flush=True)
-            append_event({"type": "stage_stats_after_gym_make", **stage_stats})
-            write_summary(stage_stats_after_gym_make=stage_stats)
+            append_event({"type": "stage_stats_after_gymnasium_make", **stage_stats})
+            write_summary(stage_stats_after_gymnasium_make=stage_stats)
 
         unwrapped = getattr(env, "unwrapped", env)
 
